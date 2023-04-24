@@ -2,9 +2,13 @@ package ca.qc.cvm.dba.recettes.dao;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 
+import ca.qc.cvm.dba.recettes.entity.Ingredient;
 import ca.qc.cvm.dba.recettes.entity.Recipe;
+import org.neo4j.driver.Session;
+import org.neo4j.driver.StatementResult;
 
 public class RecipeDAO {
 
@@ -21,8 +25,129 @@ public class RecipeDAO {
 	 */
 	public static boolean save(Recipe recipe) {
 		boolean success = false;
+
+		if (recipe.getId() != null){
+			try {
+				Session session = Neo4jConnection.getConnection();
+				HashMap<String, Object> params = new HashMap<>();
+
+				createMissingIngredient(recipe.getIngredients(), session);
+
+				params.put("id", recipe.getId());
+				params.put("name", recipe.getName());
+				params.put("portion", recipe.getPortion());
+				params.put("prepTime", recipe.getPrepTime());
+				params.put("cookTime", recipe.getCookTime());
+				params.put("steps", recipe.getSteps());
+
+				session.run("""
+					MATCH (a:Recipe {
+						id: $id
+					})
+					SET a = {
+						name: $name,
+						portion: $portion,
+						prepTime: $prepTime,
+						cookTime: $cookTime,
+						steps: $steps
+					}
+					""", params);
+
+				for (Ingredient ingredient: recipe.getIngredients()) {
+					params = new HashMap<>();
+
+					params.put("nameI", ingredient.getName());
+					params.put("nameR", recipe.getName());
+					params.put("quantity", ingredient.getQuantity());
+
+					session.run("""
+					MATCH (r:Recipe {
+						name: $nameR
+					})
+					MATCH (i:Ingredient {
+						name: $nameI
+					})
+					CREATE r-[:Contien{$quantity}]->i
+					""", params);
+				}
+
+				return true;
+			}
+			catch (Exception e) {
+				e.printStackTrace();
+			}
+		}
+		else{
+			try {
+				Session session = Neo4jConnection.getConnection();
+				HashMap<String, Object> params = new HashMap<>();
+
+				createMissingIngredient(recipe.getIngredients(), session);
+
+				params.put("name", recipe.getName());
+				params.put("portion", recipe.getPortion());
+				params.put("prepTime", recipe.getPrepTime());
+				params.put("cookTime", recipe.getCookTime());
+				params.put("steps", recipe.getSteps());
+
+				session.run("""
+					CREATE (a:Recipe {
+						name: $name,
+						portion: $portion,
+						prepTime: $prepTime,
+						cookTime: $cookTime,
+						steps: $steps
+					})
+					
+					""", params);
+
+
+
+				for (Ingredient ingredient: recipe.getIngredients()) {
+					params = new HashMap<>();
+
+					params.put("nameI", ingredient.getName());
+					params.put("nameR", recipe.getName());
+					params.put("quantity", ingredient.getQuantity());
+
+					session.run("""
+					MATCH (r:Recipe {
+						name: $nameR
+					}),
+					(i:Ingredient {
+						name: $nameI
+					})
+					CREATE (r)-[:Contient {quantity: $quantity}]->(i)
+					""", params);
+				}
+
+				return true;
+			}
+			catch (Exception e) {
+				e.printStackTrace();
+			}
+		}
+
+
+
+
 		
 		return success;
+	}
+
+	private static void createMissingIngredient(List<Ingredient> listIngredient, Session session){
+
+		for (Ingredient ingredient: listIngredient) {
+
+			HashMap<String, Object> params = new HashMap<>();
+			params.put("name", ingredient.getName());
+
+			session.run("""
+					MERGE (a:Ingredient {
+						name: $name
+					})
+					""", params);
+		}
 	}
 
 	/**

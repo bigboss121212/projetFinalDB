@@ -1,0 +1,6 @@
+
+
+Index pour s'assurer que le nom de la recette est unique:
+
+CREATE CONSTRAINT unique_name
+FOR (r:Recipe) REQUIRE r.name IS UNIQUE
