@@ -1,11 +1,10 @@
 package ca.qc.cvm.dba.recettes.dao;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
 
-import com.sleepycat.je.Database;
-import com.sleepycat.je.DatabaseConfig;
-import com.sleepycat.je.Environment;
-import com.sleepycat.je.EnvironmentConfig;
+import com.sleepycat.je.*;
 
 public class BerkeleyConnection {
 	private static Database connection;
@@ -74,5 +73,25 @@ public class BerkeleyConnection {
 				e.printStackTrace();
 			}
 		}
+	}
+
+	public static int getNbValue() {
+		getConnection();
+		int nbValue = 0;
+
+
+		try (Cursor cursor = connection.openCursor(null, null)) {
+			DatabaseEntry key = new DatabaseEntry();
+			DatabaseEntry data = new DatabaseEntry();
+
+			while (cursor.getNext(key, data, LockMode.DEFAULT) == OperationStatus.SUCCESS) {
+				//nbValue++;
+				connection.delete(null, key);
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+
+		return nbValue;
 	}
 }

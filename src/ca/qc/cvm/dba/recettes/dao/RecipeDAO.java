@@ -5,13 +5,11 @@ import java.util.*;
 
 import ca.qc.cvm.dba.recettes.entity.Ingredient;
 import ca.qc.cvm.dba.recettes.entity.Recipe;
-import com.sleepycat.je.Database;
-import com.sleepycat.je.DatabaseEntry;
-import com.sleepycat.je.LockMode;
-import com.sleepycat.je.OperationStatus;
+import com.sleepycat.je.*;
 import org.neo4j.driver.Record;
 import org.neo4j.driver.Session;
 import org.neo4j.driver.StatementResult;
+import org.neo4j.driver.Value;
 
 public class RecipeDAO {
 
@@ -109,7 +107,8 @@ public class RecipeDAO {
 						portion: $portion,
 						prepTime: $prepTime,
 						cookTime: $cookTime,
-						steps: $steps
+						steps: $steps,
+						time: timestamp()
 					})
 					RETURN elementId(a)
 					""", params);
@@ -188,69 +187,26 @@ public class RecipeDAO {
 		param.put("limit", limit);
 
 		StatementResult result = session.run("""
-    			MATCH (a:Recipe)
-  				WHERE a.name_lower STARTS WITH toLower($filtre)
-    			RETURN
+				MATCH (a:Recipe)
+				WHERE a.name_lower STARTS WITH toLower($filtre)
+				WITH a
+					MATCH (d:Recipe) -[b: Contient]- (c: Ingredient)
+					WHERE d = a
+				RETURN
 					elementId(a) as id,
-					a.name as name,
-					a.portion as por, 
-					a.prepTime as prep, 
-					a.cookTime as cook,
-					a.steps as steps
-				LIMIT $limit""", param);
-		int i = 1;
-		System.out.print("limit=");
-		System.out.println(limit);
-		System.out.print("filter=\"");
-		System.out.print(filter);
-		System.out.println("\"");
-		while (result.hasNext()){
-			System.out.println(i);
-			i++;
-			Record record = result.next();
-			String id = record.get("id").asString();
-			String name = record.get("name").asString();
-			int portion = record.get("por").asInt();
-			int prepTime = record.get("prep").asInt();
-			int cookTime = record.get("cook").asInt();
-			Vector<String> steps = new Vector<>();
-
-			List<Object> dammit_java =  record.get("steps").asList();
-			for (Object step: dammit_java) {
-				steps.add((String) step);
-			}
-
-			param.put("id", id);
-			param.put("limit", limit);
-
-			StatementResult result2 = session.run("""
-    			MATCH (a:Recipe) -[b: Contient]- (c: Ingredient)
-    			WHERE elementId(a) = $id
-    			RETURN
-					b.quantity as qu,
-					c.name as name
+					a.name       as name,
+					a.portion    as por,
+					a.prepTime   as prep,
+					a.cookTime   as cook,
+					a.steps      as steps,
+				collect([
+					b.quantity,
+					c.name]) as ing
 				LIMIT $limit""", param);
 
-			Vector<Ingredient> ingredients = new Vector<>();
-			while (result2.hasNext()) {
-				Record record2 = result2.next();
-				String quantity = record2.get(0).asString();
-				String ingredient_name = record2.get(1).asString();
-
-				Ingredient ingredient = new Ingredient(quantity, ingredient_name);
-				ingredients.add(ingredient);
-			}
-
-			Database c = BerkeleyConnection.getConnection();
-
-			DatabaseEntry theKey = new DatabaseEntry(id.getBytes(StandardCharsets.UTF_8));
-			DatabaseEntry theData = new DatabaseEntry();
-			byte[] img = null;
-			if (c.get(null, theKey, theData, LockMode.DEFAULT) == OperationStatus.SUCCESS) {
-				img = theData.getData();
-
-			}
-			recipeList.add(new Recipe(id, name, prepTime, cookTime, portion, steps, ingredients, img));
+		while (result.hasNext()) {
+			Recipe recipe = extractRecipe(result.next());
+			recipeList.add(recipe);
 		}
 
 		return recipeList;
@@ -270,10 +226,10 @@ public class RecipeDAO {
 			param.put("id", recipe.getId());
 
 			session.run("""
-    			MATCH (a:Recipe)
-    			WHERE elementId(a) = $id
-    			DELETE a
- 				""", param);
+					MATCH (a:Recipe)
+					WHERE elementId(a) = $id
+					DELETE a
+					""", param);
 
 			Database c = BerkeleyConnection.getConnection();
 			DatabaseEntry theKey = new DatabaseEntry(recipe.getId().getBytes(StandardCharsets.UTF_8));
@@ -293,16 +249,21 @@ public class RecipeDAO {
 	public static boolean deleteAll() {
 		try {
 			Session session = Neo4jConnection.getConnection();
-			StatementResult result2 = session.run("MATCH RETURN count(*) as count");
-			int total = result2.next().get("count").asInt();
 
-			List<Recipe> recipeList = getRecipeList("", total);
+			StatementResult result = session.run("""
+				MATCH (a:Recipe), (b)
+				DETACH DELETE b
+				RETURN elementId(a)
+				""");
 
-			for (Recipe recette: recipeList) {
-				delete(recette);
+			while (result.hasNext()) {
+				String id = result.next().get(0).asString();
+
+				Database c = BerkeleyConnection.getConnection();
+				DatabaseEntry theKey = new DatabaseEntry(id.getBytes(StandardCharsets.UTF_8));
+				c.delete(null, theKey);
 			}
 
-			session.run("MATCH (a) detach delete a");
 			return true;
 		}
 		catch (Exception e) {
@@ -321,13 +282,15 @@ public class RecipeDAO {
 
 		try {
 			Session session = Neo4jConnection.getConnection();
-			StatementResult result2 = session.run("""
+			StatementResult result = session.run("""
 					MATCH (r:Recipe)-[c:Contient]-()
 					WITH r, COUNT(c) AS nbRelations
 					RETURN AVG(nbRelations) AS nombreMoyenRelations
 					""");
-			num = result2.next().get(0).asDouble();
 
+			if (getRecipeCount() != 0) {
+				num = result.next().get(0).asDouble();
+			}
 		}
 		catch (Exception e) {
 			e.printStackTrace();
@@ -344,9 +307,131 @@ public class RecipeDAO {
 	 * @return la recette ayant le plus d'ingrédients
 	 */
 	public static Recipe getMostIngredientsRecipe() {
+		Session session = Neo4jConnection.getConnection();
+		StatementResult result = session.run("""
+				MATCH(r:Recipe)-[c:Contient]->()
+				WITH r.name as name, count(c) as c
+				WITH MAX(c) as max_ing
+				match (r:Recipe)-[c:Contient]->()
+				WITH count(c) as nb_ing, max_ing, r
+				WHERE max_ing = nb_ing
+							WITH r
+							MATCH (r)-[c:Contient]->(d:Ingredient)
+				RETURN
+					r.name as name,
+					elementId(r),
+					r.portion as por,
+					r.prepTime as prep,
+					r.cookTime as cook,
+					r.steps     as steps,
+					collect([
+						c.quantity,
+						d.name]) as ing
+				LIMIT 1
+				""");
+
+		if (result.hasNext()) {
+			return extractRecipe(result.next());
+		} else {
+			return null;
+		}
+
+	}
+
+	private static Recipe extractRecipe(Record record) {
+		String id = record.get("id").asString();
+		String name = record.get("name").asString();
+		int portion = record.get("por").asInt();
+		int prepTime = record.get("prep").asInt();
+		int cookTime = record.get("cook").asInt();
+
+		List<Ingredient> ingredients = record.get("ing").asList((value -> {
+			String quantity = value.get(0).asString();
+			String ingredient_name = value.get(1).asString();
+
+			return new Ingredient(quantity, ingredient_name);
+		}));
+		byte[] img = getImg(id);
+
+		List<String> steps =  record.get("steps").asList(Value::asString);
+		return new Recipe(id, name, prepTime, cookTime, portion, steps, ingredients, img);
+	}
+
+	private static Recipe getOneRecipe(String id){
 		Recipe r = null;
 
+
+		Session session = Neo4jConnection.getConnection();
+		HashMap<String, Object> param = new HashMap<>();
+
+		param.put("id", id);
+
+		StatementResult result = session.run("""
+    			MATCH (a:Recipe)
+  				WHERE elementId(a) = $id
+    			RETURN
+					elementId(a) as id,
+					a.name as name,
+					a.portion as por,
+					a.prepTime as prep, 
+					a.cookTime as cook,
+					a.steps as steps
+				""", param);
+
+		if (result.hasNext()) {
+			Record data = result.next();
+			String name = data.get("name").asString();
+			int prepTime = data.get("prep").asInt();
+			int cookTime = data.get("cook").asInt();
+			int portion = data.get("por").asInt();
+			List<String> step = data.get("steps").asList(Value::asString);
+			List<Ingredient> ingredients = getIngredient(id);
+			byte[] img = getImg(id);
+
+			r = new Recipe(id, name, prepTime, cookTime, portion, step, ingredients, img);
+		}
+
 		return r;
+	}
+
+	private static Vector<Ingredient> getIngredient(String id) {
+		Session session = Neo4jConnection.getConnection();
+		HashMap<String, Object> param = new HashMap<>();
+
+		param.put("id", id);
+
+		StatementResult result2 = session.run("""
+				MATCH (a:Recipe) -[b: Contient]- (c: Ingredient)
+				WHERE elementId(a) = $id
+				RETURN
+					b.quantity as qu,
+					c.name as name
+				LIMIT $limit""", param);
+
+		Vector<Ingredient> ingredients = new Vector<>();
+		while (result2.hasNext()) {
+			Record record2 = result2.next();
+			String quantity = record2.get(0).asString();
+			String ingredient_name = record2.get(1).asString();
+
+			Ingredient ingredient = new Ingredient(quantity, ingredient_name);
+			ingredients.add(ingredient);
+		}
+
+		return ingredients;
+	}
+
+	private static byte[] getImg(String id) {
+		Database c = BerkeleyConnection.getConnection();
+
+		DatabaseEntry theKey = new DatabaseEntry(id.getBytes(StandardCharsets.UTF_8));
+		DatabaseEntry theData = new DatabaseEntry();
+		byte[] img = null;
+		if (c.get(null, theKey, theData, LockMode.DEFAULT) == OperationStatus.SUCCESS) {
+			img = theData.getData();
+		}
+
+		return img;
 	}
 	
 	/**
@@ -357,9 +442,20 @@ public class RecipeDAO {
 	 * @return le temps maximal
 	 */
 	public static long getMaxRecipeTime() {
-		long num = 0;
-		
-		return num;
+		Session session = Neo4jConnection.getConnection();
+		HashMap<String, Object> param = new HashMap<>();
+
+		StatementResult result = session.run("""
+				MATCH (r:Recipe)
+				WITH r.prepTime + r.cookTime as total_time
+				RETURN MAX(total_time)
+				""", param);
+
+		if (getRecipeCount() != 0) {
+			return result.next().get(0).asInt();
+		} else {
+			return 0;
+		}
 	}
 	
 	/**
@@ -368,8 +464,23 @@ public class RecipeDAO {
 	 * @return nombre de photos dans BerkeleyDB
 	 */
 	public static long getPhotoCount() {
-		long num = 0;
-		return num;
+
+		Database connection = BerkeleyConnection.getConnection();
+		int nbValue = 0;
+
+		try (Cursor cursor = connection.openCursor(null, null)) {
+			DatabaseEntry key = new DatabaseEntry();
+			DatabaseEntry data = new DatabaseEntry();
+
+			while (cursor.getNext(key, data, LockMode.DEFAULT) == OperationStatus.SUCCESS) {
+				nbValue++;
+
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+
+		return nbValue;
 	}
 
 	/**
@@ -378,9 +489,14 @@ public class RecipeDAO {
 	 * @return nombre de recettes
 	 */
 	public static long getRecipeCount() {
-		long num = 0;
-		
-		return num;
+		Session session = Neo4jConnection.getConnection();
+
+		StatementResult result = session.run("""
+				MATCH (r:Recipe)
+				RETURN COUNT(*)
+				""");
+
+		return result.next().get(0).asInt();
 	}
 	
 	/**
@@ -389,9 +505,31 @@ public class RecipeDAO {
 	 * @return la dernière recette
 	 */
 	public static Recipe getLastAddedRecipe() {
-		Recipe recipe = null;
-		
-		return recipe;
+		Session session = Neo4jConnection.getConnection();
+
+		StatementResult result = session.run("""
+				MATCH (r:Recipe) -[b: Contient]- (c: Ingredient)
+				RETURN
+					elementId(r) as id,
+					r.name       as name,
+					r.portion    as por,
+					r.prepTime   as prep,
+					r.cookTime   as cook,
+					r.steps      as steps,
+					r.time as AH,
+				collect([
+					b.quantity,
+					c.name
+					]) as ing
+				ORDER BY AH DESC
+				LIMIT 1
+				""");
+
+		if (getRecipeCount() != 0) {
+			return extractRecipe(result.next());
+		} else {
+			return null;
+		}
 	}
 	
 	/**
