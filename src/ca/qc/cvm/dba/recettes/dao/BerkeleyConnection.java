@@ -1,8 +1,8 @@
 package ca.qc.cvm.dba.recettes.dao;
 
 import java.io.File;
-import java.util.ArrayList;
-import java.util.List;
+import java.util.Collections;
+import java.util.Vector;
 
 import com.sleepycat.je.*;
 
@@ -75,23 +75,28 @@ public class BerkeleyConnection {
 		}
 	}
 
-	public static int getNbValue() {
+	public static byte[] getRandomImg() {
 		getConnection();
-		int nbValue = 0;
 
 
+		Vector<byte[]> list = new Vector<>();
 		try (Cursor cursor = connection.openCursor(null, null)) {
 			DatabaseEntry key = new DatabaseEntry();
 			DatabaseEntry data = new DatabaseEntry();
 
 			while (cursor.getNext(key, data, LockMode.DEFAULT) == OperationStatus.SUCCESS) {
-				//nbValue++;
-				connection.delete(null, key);
+				list.add(data.getData());
 			}
+
+			Collections.shuffle(list);
 		} catch (Exception e) {
 			e.printStackTrace();
 		}
 
-		return nbValue;
+		if (list.size() != 0) {
+			return list.get(0);
+		}
+
+		return null;
 	}
 }
